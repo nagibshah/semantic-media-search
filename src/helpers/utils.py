@@ -1,4 +1,5 @@
 import os
+import io
 import boto3
 from pathlib import Path
 import pandas as pd
@@ -34,7 +35,6 @@ multimodal_embed_model = f'amazon.titan-embed-image-v1'
 """
 Function to generate Embeddings from image or text
 """
-
 def get_titan_multimodal_embedding(
     image_path:str=None,  # maximum 2048 x 2048 pixels
     description:str=None, # English only and max input tokens 128
@@ -49,19 +49,9 @@ def get_titan_multimodal_embedding(
     }
     # You can specify either text or image or both
     if image_path:
-        if image_path.startswith('s3'):
-            s3 = boto3.client('s3')
-            bucket_name, key = image_path.replace("s3://", "").split("/", 1)
-            obj = s3.get_object(Bucket=bucket_name, Key=key)
-            # Read the object's body
-            body = obj['Body'].read()
-            # Encode the body in base64
-            base64_image = base64.b64encode(body).decode('utf-8')
-            payload_body["inputImage"] = base64_image
-        else:   
-            with open(image_path, "rb") as image_file:
-                input_image = base64.b64encode(image_file.read()).decode('utf8')
-            payload_body["inputImage"] = input_image
+        with open(image_path, "rb") as image_file:
+            input_image = base64.b64encode(image_file.read()).decode('utf8')
+        payload_body["inputImage"] = input_image
     if description:
         payload_body["inputText"] = description
 
@@ -77,7 +67,79 @@ def get_titan_multimodal_embedding(
 
     return json.loads(response.get("body").read())
 
+"""
+function to generate an image using titan image generator model 
+"""
+def generate_titan_image(prompt, neg_prompt, seed=1, number_of_images=1):
+    # Create payload
+    body = json.dumps(
+        {
+            "taskType": "TEXT_IMAGE",
+            "textToImageParams": {
+                "text": prompt,                    # Required
+                "negativeText": neg_prompt   # Optional
+            },
+            "imageGenerationConfig": {
+                "numberOfImages": number_of_images,   # Range: 1 to 5 
+                "quality": "premium",  # Options: standard or premium
+                "height": 512,        # Supported height list in the docs 
+                "width": 512,         # Supported width list in the docs
+                "cfgScale": 7.5,       # Range: 1.0 (exclusive) to 10.0
+                "seed": seed             # Range: 0 to 214783647
+            }
+        }
+    )
+    # Make model request
+    response = bedrock_client.invoke_model(
+        body=body,
+        modelId="amazon.titan-image-generator-v1",
+        accept="application/json", 
+        contentType="application/json"
+    )
+    # Process the image payload
+    response_body = json.loads(response.get("body").read())
+    img1_b64 = response_body["images"][0] # in bytes IO
 
+    img = Image.open(io.BytesIO(base64.decodebytes(bytes(img1_b64, "utf-8"))))
+    
+    return img
+
+"""
+function to generate description of an image
+"""
+def generate_img_desc(prompt,img_path, max_tokens=512,temp=0.5,top_p=0.9):
+
+    modelid = 'anthropic.claude-3-sonnet-20240229-v1:0'
+    
+    # Read reference image from file and encode as base64 strings.
+    img_b64 = ""
+    with open(img_path, "rb") as image_file:
+        img_b64 = base64.b64encode(image_file.read()).decode('utf8')
+        
+    message_mm = [
+        { "role": "user",
+          "content": [
+          {"type": "image","source": { "type": "base64","media_type":"image/jpeg","data": img_b64}},
+          {"type": "text","text": prompt}
+          ]
+        }
+    ]
+
+    body=json.dumps(
+        {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "messages": message_mm,
+            "temperature": temp,
+            "top_p": top_p
+        }  
+    )  
+    
+    response = bedrock_client.invoke_model(body=body, modelId=modelid)
+    response_body = json.loads(response.get('body').read())
+    response_text = response_body["content"][0]["text"]    
+
+    return response_text
 
 """ 
 Function to plot heatmap from embeddings
@@ -113,20 +175,11 @@ def get_image_from_item_id( item_id = "0", dataset = None, return_image=True):
 Function to fetch the image based on image id from S3 bucket
 """
     
-def get_image_from_item_id_s3(image_id = "B0896LJNLH", dataset = None, image_path = None,  return_image=True):
+def get_image_from_item_id(image_id = "B0896LJNLH", dataset = None, image_path = None,  return_image=True):
 
     item_idx = dataset.query(f"image_id == '{image_id}'").index[0]
-    img_loc =  dataset.iloc[item_idx].path
-    
-    #if img_loc.startswith('s3'):
-    #    # download and store images locally 
-    #    local_data_root = f'./data/images'
-    #    local_file_name = img_loc.split('/')[-1]
- 
-    #    s3down.download(img_loc, local_data_root)
- 
-    #local_image_path = f"{local_data_root}/{local_file_name}"
-    
+    img_loc = dataset.iloc[item_idx].path
+
     if return_image:
         img = Image.open(img_loc)
         return img, dataset.iloc[item_idx].title
@@ -160,135 +213,16 @@ def display_images(
             plt.title(image.name_and_score, fontsize=label_font_size); 
             
 
-""" 
-Function for semantic search capability using knn on input query prompt.
-"""
-def find_similar_items_from_query(query_prompt: str, k: int, num_results: int, index_name: str, image_root_path: str, dataset, open_search_client ) -> []:
-    """
-    Main semantic search capability using knn on input query prompt.
-    Args:
-        k: number of top-k similar vectors to retrieve from OpenSearch index
-        num_results: number of the top-k similar vectors to retrieve
-        index_name: index name in OpenSearch
-    """
-    query_emb = get_titan_multimodal_embedding(description=query_prompt, dimension=1024)["embedding"]
 
-    body = {
-        "size": num_results,
-        "_source": {
-            "exclude": ["image_vector"],
-        },
-        "query": {
-            "knn": {
-                "image_vector": {
-                    "vector": query_emb,
-                    "k": k,
-                }
-            }
-        },
-    }     
-
-    res = open_search_client.search(index=index_name, body=body)
-    images = []
-    
-    for hit in res["hits"]["hits"]:
-        id_ = hit["_id"]
-        item_id_ = hit["_source"]["image_id"]
-        # image, item_name = get_image_from_item_id(item_id = id_, dataset = dataset )
-        image, item_name = get_image_from_item_id_s3(image_id = item_id_, dataset = dataset,image_path = image_root_path)
-        image.name_and_score = f'{hit["_score"]}:{item_name}'
-        images.append(image)
-        
-    return images
 
 def display_results(res, dataset):
     images = []
     for hit in res["hits"]["hits"]:
         item_id_ = hit["_source"]["image_id"]
-        image, item_name = get_image_from_item_id_s3(image_id = item_id_, dataset = dataset,image_path = None)
+        image, item_name = get_image_from_item_id(image_id = item_id_, dataset = dataset,image_path = None)
         image.name_and_score = f'{hit["_score"]}:{item_name}'
         images.append(image)
     display_images(images)
     return 
 
-""" 
-Function for semantic search capability using knn on input image prompt.
-"""
-def find_similar_items_from_image(image_path: str, k: int, num_results: int, index_name: str, image_root_path: str, dataset, open_search_client  ) -> []:
-    """
-    Main semantic search capability using knn on input image prompt.
-    Args:
-        k: number of top-k similar vectors to retrieve from OpenSearch index
-        num_results: number of the top-k similar vectors to retrieve
-        index_name: index name in OpenSearch
-    """
-    query_emb = get_titan_multimodal_embedding(image_path=image_path, dimension=1024)["embedding"]
 
-    body = {
-        "size": num_results,
-        "_source": {
-            "exclude": ["image_vector"],
-        },
-        "query": {
-            "knn": {
-                "image_vector": {
-                    "vector": query_emb,
-                    "k": k,
-                }
-            }
-        },
-    }     
-
-    res = open_search_client.search(index=index_name, body=body)
-    images = []
-    
-    for hit in res["hits"]["hits"]:
-        id_ = hit["_id"]
-        item_id_ = hit["_source"]["image_id"]
-        # image, item_name = get_image_from_item_id(item_id = id_, dataset = dataset )
-        image, item_name = get_image_from_item_id_s3(image_id = item_id_, dataset = dataset,image_path = image_root_path)
-        image.name_and_score = f'{hit["_score"]}:{item_name}'
-        images.append(image)
-        
-    return images
-
-""" 
-Function for semantic search capability using knn on input image a as well as text prompt
-"""
-def find_similar_items_from_image_and_text(image_path: str, query_prompt: str, k: int, num_results: int, index_name: str, image_root_path: str, dataset, open_search_client  ) -> []:
-    """
-    Main semantic search capability using knn on input image & text prompt.
-    Args:
-        k: number of top-k similar vectors to retrieve from OpenSearch index
-        num_results: number of the top-k similar vectors to retrieve
-        index_name: index name in OpenSearch
-    """
-    query_emb = get_titan_multimodal_embedding(image_path=image_path, description=query_prompt, dimension=1024)["embedding"]
-
-    body = {
-        "size": num_results,
-        "_source": {
-            "exclude": ["image_vector"],
-        },
-        "query": {
-            "knn": {
-                "image_vector": {
-                    "vector": query_emb,
-                    "k": k,
-                }
-            }
-        },
-    }     
-
-    res = open_search_client.search(index=index_name, body=body)
-    images = []
-    
-    for hit in res["hits"]["hits"]:
-        id_ = hit["_id"]
-        item_id_ = hit["_source"]["image_id"]
-        # image, item_name = get_image_from_item_id(item_id = id_, dataset = dataset )
-        image, item_name = get_image_from_item_id_s3(image_id = item_id_, dataset = dataset,image_path = image_root_path)
-        image.name_and_score = f'{hit["_score"]}:{item_name}'
-        images.append(image)
-        
-    return images
