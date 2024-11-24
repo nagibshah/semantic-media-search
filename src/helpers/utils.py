@@ -81,7 +81,7 @@ def generate_titan_image(prompt, neg_prompt, seed=1, number_of_images=1):
             },
             "imageGenerationConfig": {
                 "numberOfImages": number_of_images,   # Range: 1 to 5 
-                "quality": "premium",  # Options: standard or premium
+                #"quality": "premium",  # Options: standard or premium
                 "height": 512,        # Supported height list in the docs 
                 "width": 512,         # Supported width list in the docs
                 "cfgScale": 7.5,       # Range: 1.0 (exclusive) to 10.0
@@ -92,7 +92,7 @@ def generate_titan_image(prompt, neg_prompt, seed=1, number_of_images=1):
     # Make model request
     response = bedrock_client.invoke_model(
         body=body,
-        modelId="amazon.titan-image-generator-v1",
+        modelId='amazon.titan-image-generator-v2:0', #"amazon.titan-image-generator-v1",
         accept="application/json", 
         contentType="application/json"
     )
